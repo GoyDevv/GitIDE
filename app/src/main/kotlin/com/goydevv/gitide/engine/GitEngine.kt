@@ -6,8 +6,10 @@ object GitEngine {
 
     private var prootBinary: File? = null
     private var rootfsDir: File? = null
+    private var baseDir: File? = null
 
     fun initialize(filesDir: File) {
+        baseDir = filesDir
         prootBinary = File(filesDir, "usr/bin/proot")
         rootfsDir = File(filesDir, "proot/rootfs")
     }
@@ -16,8 +18,9 @@ object GitEngine {
         return try {
             val proot = prootBinary
             val rootfs = rootfsDir
+            val base = baseDir
 
-            val command = if (proot != null && proot.exists() && rootfs != null && rootfs.exists()) {
+            val command = if (proot != null && proot.exists() && rootfs != null && rootfs.exists() && base != null) {
                 listOf(
                     proot.absolutePath,
                     "-r", rootfs.absolutePath,
@@ -26,8 +29,9 @@ object GitEngine {
                     "-b", "/proc",
                     "-b", "/sys",
                     "-b", "/sdcard",
-                    "-w", projectDir.absolutePath,
-                    "/usr/bin/git" // Point explicitly to the internal Alpine binary location
+                    "-b", "${base.absolutePath}:${base.absolutePath}", // Map internal storage
+                    "-w", projectDir.absolutePath, // Working directory (same path works due to bind)
+                    "/usr/bin/git"
                 ) + args
             } else {
                 listOf("git") + args
@@ -37,6 +41,11 @@ object GitEngine {
                 .command(command)
                 .directory(projectDir)
                 .redirectErrorStream(true)
+                .apply {
+                    environment()["HOME"] = "/home/goydevv"
+                    environment()["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+                    environment()["TERM"] = "xterm-256color"
+                }
                 .start()
 
             val output = process.inputStream.bufferedReader().use { it.readText() }
