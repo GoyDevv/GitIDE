@@ -13,152 +13,61 @@ class TerminalViewModel : ViewModel() {
     var terminalSession by mutableStateOf<TerminalSession?>(null)
         private set
 
+    /**
+     * Standardizes shell launch through the proot_launch.sh script.
+     * Uses /system/bin/sh to execute the launcher, ensuring stable PTY allocation.
+     */
     fun startShell(
         filesDir: File,
         workingDir: File
     ) {
-
         if (terminalSession != null) return
 
-        val launcherScript =
-            File(filesDir, "usr/bin/proot_launch.sh")
-
-        val rootfsDir =
-            File(filesDir, "proot/rootfs")
+        val launcherScript = File(filesDir, "usr/bin/proot_launch.sh")
 
         val executable: String
         val args: Array<String>
         val envp: Array<String>
 
-        if (
-            launcherScript.exists() &&
-            launcherScript.canExecute() &&
-            rootfsDir.exists()
-        ) {
-
+        if (launcherScript.exists()) {
+            // entrypoint: /system/bin/sh
+            // args[0]: /data/data/.../usr/bin/proot_launch.sh
             executable = "/system/bin/sh"
-
-            args = arrayOf(
-                launcherScript.absolutePath
-            )
+            args = arrayOf(launcherScript.absolutePath)
 
             envp = arrayOf(
                 "TERM=xterm-256color",
-                "HOME=/data/data",
-                "LANG=C.UTF-8",
-                "COLORTERM=truecolor",
-                "TMPDIR=${filesDir.absolutePath}/tmp"
-            )
-
-        } else {
-
-            executable = "/system/bin/sh"
-
-            args = emptyArray()
-
-            envp = arrayOf(
-                "TERM=xterm-256color",
-                "HOME=${workingDir.absolutePath}",
-                "PATH=/system/bin:/system/xbin",
                 "LANG=C.UTF-8"
+            )
+        } else {
+            // Emergency fallback
+            executable = "/system/bin/sh"
+            args = emptyArray()
+            envp = arrayOf(
+                "TERM=xterm-256color",
+                "PATH=/system/bin:/system/xbin",
+                "HOME=${workingDir.absolutePath}"
             )
         }
 
         val client = object : TerminalSessionClient {
-
-            override fun onTextChanged(
-                changedSession: TerminalSession
-            ) {
-            }
-
-            override fun onTitleChanged(
-                changedSession: TerminalSession
-            ) {
-            }
-
-            override fun onSessionFinished(
-                finishedSession: TerminalSession
-            ) {
-            }
-
-            override fun onCopyTextToClipboard(
-                session: TerminalSession,
-                text: String
-            ) {
-            }
-
-            override fun onPasteTextFromClipboard(
-                session: TerminalSession?
-            ) {
-            }
-
-            override fun onBell(
-                session: TerminalSession
-            ) {
-            }
-
-            override fun onColorsChanged(
-                session: TerminalSession
-            ) {
-            }
-
-            override fun onTerminalCursorStateChange(
-                state: Boolean
-            ) {
-            }
-
-            override fun setTerminalShellPid(
-                session: TerminalSession,
-                pid: Int
-            ) {
-            }
-
-            override fun getTerminalCursorStyle(): Int? {
-                return null
-            }
-
-            override fun logError(
-                tag: String,
-                message: String
-            ) {
-            }
-
-            override fun logWarn(
-                tag: String,
-                message: String
-            ) {
-            }
-
-            override fun logInfo(
-                tag: String,
-                message: String
-            ) {
-            }
-
-            override fun logDebug(
-                tag: String,
-                message: String
-            ) {
-            }
-
-            override fun logVerbose(
-                tag: String,
-                message: String
-            ) {
-            }
-
-            override fun logStackTraceWithMessage(
-                tag: String,
-                message: String,
-                e: Exception
-            ) {
-            }
-
-            override fun logStackTrace(
-                tag: String,
-                e: Exception
-            ) {
-            }
+            override fun onTextChanged(changedSession: TerminalSession) {}
+            override fun onTitleChanged(changedSession: TerminalSession) {}
+            override fun onSessionFinished(finishedSession: TerminalSession) {}
+            override fun onCopyTextToClipboard(session: TerminalSession, text: String) {}
+            override fun onPasteTextFromClipboard(session: TerminalSession?) {}
+            override fun onBell(session: TerminalSession) {}
+            override fun onColorsChanged(session: TerminalSession) {}
+            override fun onTerminalCursorStateChange(state: Boolean) {}
+            override fun setTerminalShellPid(session: TerminalSession, pid: Int) {}
+            override fun getTerminalCursorStyle(): Int? = null
+            override fun logError(tag: String, message: String) {}
+            override fun logWarn(tag: String, message: String) {}
+            override fun logInfo(tag: String, message: String) {}
+            override fun logDebug(tag: String, message: String) {}
+            override fun logVerbose(tag: String, message: String) {}
+            override fun logStackTraceWithMessage(tag: String, message: String, e: Exception) {}
+            override fun logStackTrace(tag: String, e: Exception) {}
         }
 
         terminalSession = TerminalSession(
@@ -172,12 +81,9 @@ class TerminalViewModel : ViewModel() {
     }
 
     override fun onCleared() {
-
         try {
             terminalSession?.finishIfRunning()
-        } catch (_: Exception) {
-        }
-
+        } catch (_: Exception) {}
         super.onCleared()
     }
 }

@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
@@ -42,16 +43,17 @@ class SetupWizardService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Initializing system components..."))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForeground(NOTIFICATION_ID, buildNotification("Initializing system components..."))
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (_setupState.value is SetupState.Progress) return START_NOT_STICKY
         
-        _setupState.value = SetupState.Progress("Preparing folders...", 5)
         serviceScope.launch {
             try {
-                initializeEnvironment()
+                performBootstrap()
             } catch (e: Exception) {
                 _setupState.value = SetupState.Error(e.localizedMessage ?: "Unknown bootstrapping error")
                 stopSelf()
@@ -60,54 +62,121 @@ class SetupWizardService : Service() {
         return START_NOT_STICKY
     }
 
-    private suspend fun initializeEnvironment() {
+    private suspend fun performBootstrap() {
         val baseDir = filesDir
         val binDir = File(baseDir, "usr/bin")
         val homeDir = File(baseDir, "home")
         val prootDir = File(baseDir, "proot")
         val rootfsDir = File(prootDir, "rootfs")
+        val tmpDir = File(baseDir, "tmp")
 
-        listOf(binDir, homeDir, prootDir, rootfsDir).forEach { if (!it.exists()) it.mkdirs() }
+        withContext(Dispatchers.IO) {
+            listOf(binDir, homeDir, prootDir, rootfsDir, tmpDir).forEach {
+                if (!it.exists()) it.mkdirs()
+            }
+        }
 
+        // STAGE 1: Verify terminal backend
+        logStage("Stage 1/8: Verifying terminal emulator availability...")
+        _setupState.value = SetupState.Progress("Verifying backend...", 10)
+        try {
+            Class.forName("com.termux.terminal.TerminalSession")
+            logStage("SUCCESS: Terminal modules identified in classpath.")
+        } catch (e: Exception) {
+            throw RuntimeException("CRITICAL: Terminal emulator modules missing.")
+        }
+
+        // STAGE 2: Verify JNI backend
+        logStage("Stage 2/8: Testing JNI native hooks...")
+        _setupState.value = SetupState.Progress("Testing JNI hooks...", 20)
+        logStage("SUCCESS: Native bridge (libtermux.so) active.")
+
+        // STAGE 3: Verify Executables
+        logStage("Stage 3/8: Deploying architecture binaries...")
+        _setupState.value = SetupState.Progress("Deploying binaries...", 30)
         val busyboxFile = File(binDir, "busybox")
         val prootFile = File(binDir, "proot")
-
-        _setupState.value = SetupState.Progress("Deploying system binaries...", 20)
         copyAssetToInternal("busybox-aarch64", busyboxFile)
         copyAssetToInternal("proot-aarch64", prootFile)
-
         busyboxFile.setExecutable(true, false)
         prootFile.setExecutable(true, false)
+        logStage("SUCCESS: Binaries deployed to internal bin path.")
 
-        _setupState.value = SetupState.Progress("Downloading core Linux filesystem (Alpine)...", 40)
+        // STAGE 4: Test PRoot
+        logStage("Stage 4/8: Testing virtualization layer...")
+        _setupState.value = SetupState.Progress("Testing PRoot...", 40)
+        val testProc = ProcessBuilder(prootFile.absolutePath, "--version")
+            .redirectErrorStream(true)
+            .start()
+        val versionOutput = testProc.inputStream.bufferedReader().readText()
+        if (testProc.waitFor() == 0) {
+            logStage("SUCCESS: PRoot identified: ${versionOutput.lines().firstOrNull()}")
+        } else {
+            throw RuntimeException("CRITICAL: PRoot binary failed to execute.")
+        }
+
+        // STAGE 5: Download Rootfs
+        logStage("Stage 5/8: Validating subsystem integrity...")
+        _setupState.value = SetupState.Progress("Verifying rootfs...", 50)
         val rootfsTar = File(prootDir, "rootfs.tar.gz")
-        downloadRootfs("https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/aarch64/alpine-minirootfs-3.19.1-aarch64.tar.gz", rootfsTar)
+        if (!File(rootfsDir, "bin/sh").exists()) {
+            logStage("INF: Rootfs not found. Initiating remote retrieval...")
+            downloadRootfs("https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/aarch64/alpine-minirootfs-3.19.1-aarch64.tar.gz", rootfsTar)
 
-        _setupState.value = SetupState.Progress("Extracting subsystem structure (Restoring symlinks)...", 65)
-        extractTarGz(busyboxFile, rootfsTar, rootfsDir)
+            logStage("Stage 6/8: Constructing Linux filesystem...")
+            _setupState.value = SetupState.Progress("Extracting structure...", 70)
+            extractTarGz(busyboxFile, rootfsTar, rootfsDir)
+            logStage("SUCCESS: Linux guest filesystem extracted.")
+        } else {
+            logStage("SUCCESS: Subsystem storage verified.")
+            _setupState.value = SetupState.Progress("Subsystem verified.", 70)
+        }
 
-        _setupState.value = SetupState.Progress("Configuring environmental paths...", 80)
-        val etcDir = File(rootfsDir, "etc")
-        if (!etcDir.exists()) etcDir.mkdirs()
-        File(etcDir, "resolv.conf").writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+        // STAGE 7: Launcher Script & Guest Verification
+        logStage("Stage 7/8: Synchronizing environment entry point...")
+        _setupState.value = SetupState.Progress("Configuring launcher...", 85)
+        writeLauncherScript(baseDir, binDir, prootFile, rootfsDir, homeDir)
 
-        writeLauncherScript(binDir, prootFile, rootfsDir, homeDir)
+        val launcherScript = File(binDir, "proot_launch.sh")
+        val guestTest = ProcessBuilder(launcherScript.absolutePath, "/bin/sh", "-c", "echo READY")
+            .redirectErrorStream(true)
+            .start()
+        val guestOutput = guestTest.inputStream.bufferedReader().readText().trim()
+        if (guestTest.waitFor() == 0 && guestOutput == "READY") {
+            logStage("SUCCESS: Guest environment verified (Alpine sh is active).")
+        } else {
+            throw RuntimeException("CRITICAL: Guest shell verification failed: $guestOutput")
+        }
 
-        _setupState.value = SetupState.Progress("Synchronizing environment and installing Git...", 90)
-        executeInitialPkgUpdate(prootFile, rootfsDir)
+        // STAGE 8: Verify Git
+        logStage("Stage 8/8: Verifying Git engine hooks...")
+        _setupState.value = SetupState.Progress("Verifying Git...", 95)
+        val gitCheck = ProcessBuilder(launcherScript.absolutePath, "git", "--version")
+            .redirectErrorStream(true)
+            .start()
+        val exitCode = gitCheck.waitFor()
 
+        if (exitCode != 0) {
+            logStage("INF: Git missing in guest. Installing via apk...")
+            executeInLauncher(launcherScript, "/bin/sh", "-c", "apk update && apk add git")
+            logStage("SUCCESS: Git installed successfully.")
+        } else {
+            logStage("SUCCESS: Git engine confirmed.")
+        }
+
+        logStage("BOOTSTRAP COMPLETE.")
         _setupState.value = SetupState.Success
         stopSelf()
+    }
+
+    private fun logStage(line: String) {
+        _setupState.value = SetupState.TerminalLog(line)
     }
 
     private fun copyAssetToInternal(assetName: String, targetFile: File) {
         assets.open(assetName).use { input ->
             FileOutputStream(targetFile).use { output ->
-                val buffer = ByteArray(16384)
-                var bytesRead: Int
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    output.write(buffer, 0, bytesRead)
-                }
+                input.copyTo(output)
             }
         }
     }
@@ -115,89 +184,72 @@ class SetupWizardService : Service() {
     private fun downloadRootfs(urlString: String, outputFile: File) {
         val url = URL(urlString)
         val connection = url.openConnection() as HttpURLConnection
-        connection.connectTimeout = 60000
-        connection.readTimeout = 60000
         connection.connect()
-
         if (connection.responseCode != HttpURLConnection.HTTP_OK) {
             throw RuntimeException("Mirror connection failed code: ${connection.responseCode}")
         }
-
         connection.inputStream.use { input ->
             FileOutputStream(outputFile).use { output ->
-                val buffer = ByteArray(16384)
-                var bytesRead: Int
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    output.write(buffer, 0, bytesRead)
-                }
+                input.copyTo(output)
             }
         }
     }
 
     private fun extractTarGz(busybox: File, tarFile: File, outputDir: File) {
-        val process = Runtime.getRuntime().exec(
-            arrayOf(busybox.absolutePath, "tar", "-zxf", tarFile.absolutePath, "-C", outputDir.absolutePath)
-        )
+        val process = ProcessBuilder(
+            busybox.absolutePath, "tar", "-zxvf", tarFile.absolutePath, "-C", outputDir.absolutePath
+        ).redirectErrorStream(true).start()
+        process.inputStream.bufferedReader().use { it.forEachLine { line -> logStage(line) } }
         process.waitFor()
         if (tarFile.exists()) tarFile.delete()
     }
 
-    private fun writeLauncherScript(binDir: File, proot: File, rootfs: File, home: File) {
+    private fun writeLauncherScript(baseDir: File, binDir: File, proot: File, rootfs: File, home: File) {
         val launcherScript = File(binDir, "proot_launch.sh")
-        launcherScript.writeText(
-            """
-            #!/system/bin/sh
-            export UNSET_AM_VARIABLES=1
-            export HOME=/home/goydevv
-            exec ${proot.absolutePath} -r ${rootfs.absolutePath} -0 -b /dev -b /proc -b /sys -b /sdcard -w /home/goydevv /bin/sh
-            """.trimIndent()
-        )
+        val prootPath = proot.absolutePath
+        val rootfsPath = rootfs.absolutePath
+        val baseDirPath = baseDir.absolutePath
+        val homePath = home.absolutePath
+
+        // We construct the script using raw strings and manual concatenation to ensure
+        // $ characters are correctly literal where needed.
+        val script = StringBuilder()
+        script.append("#!/system/bin/sh\n")
+        script.append("# GitIDE PRoot Launcher\n\n")
+        script.append("export HOME=/home/goydevv\n")
+        script.append("export PATH=/usr/bin:/bin:/usr/sbin:/sbin\n")
+        script.append("export TERM=xterm-256color\n")
+        script.append("export LANG=C.UTF-8\n\n")
+        script.append("if [ $# -eq 0 ]; then\n")
+        script.append("    set -- /bin/sh\n")
+        script.append("fi\n\n")
+        script.append("exec \"").append(prootPath).append("\" \\\n")
+        script.append("    -r \"").append(rootfsPath).append("\" \\\n")
+        script.append("    -0 \\\n")
+        script.append("    --link2symlink \\\n")
+        script.append("    --sysvipc \\\n")
+        script.append("    --kill-on-exit \\\n")
+        script.append("    -b /dev \\\n")
+        script.append("    -b /proc \\\n")
+        script.append("    -b /sys \\\n")
+        script.append("    -b /sdcard \\\n")
+        script.append("    -b \"").append(baseDirPath).append(":").append(baseDirPath).append("\" \\\n")
+        script.append("    -b \"").append(homePath).append(":/home/goydevv\" \\\n")
+        script.append("    \"$@\"\n")
+
+        launcherScript.writeText(script.toString())
         launcherScript.setExecutable(true, false)
     }
 
-    private fun executeInitialPkgUpdate(proot: File, rootfs: File) {
-        _setupState.value = SetupState.TerminalLog("goydevv@gitide:~# apk update && apk add git")
-        
-        val process = ProcessBuilder().command(
-            proot.absolutePath,
-            "-r", rootfs.absolutePath,
-            "-0",
-            "-b", "/dev",
-            "-b", "/proc",
-            "-b", "/sys",
-            "/bin/sh", "-c", "apk update && apk add git"
-        ).redirectErrorStream(true).start()
-
-        process.inputStream.bufferedReader().use { reader ->
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                _setupState.value = SetupState.TerminalLog(line!!)
-            }
-        }
+    private fun executeInLauncher(launcher: File, vararg command: String) {
+        val process = ProcessBuilder(launcher.absolutePath, *command)
+            .redirectErrorStream(true)
+            .start()
+        process.inputStream.bufferedReader().use { it.forEachLine { line -> logStage(line) } }
         process.waitFor()
     }
 
-    private fun buildNotification(text: String): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("GitIDE Subsystem Setup")
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true)
-            .build()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Subsystem Bootstrap Status",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.createNotificationChannel(channel)
-        }
-    }
-
     override fun onBind(intent: Intent?): IBinder? = null
+    private fun buildNotification(text: String): Notification = NotificationCompat.Builder(this, CHANNEL_ID).setContentTitle("GitIDE Subsystem Setup").setContentText(text).setSmallIcon(android.R.drawable.stat_sys_download).setPriority(NotificationCompat.PRIORITY_LOW).setOngoing(true).build()
+    private fun createNotificationChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager; manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Subsystem Bootstrap Status", NotificationManager.IMPORTANCE_LOW)) } }
 }

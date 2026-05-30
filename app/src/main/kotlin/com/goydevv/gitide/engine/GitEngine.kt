@@ -4,32 +4,26 @@ import java.io.File
 
 object GitEngine {
 
-    private var prootBinary: File? = null
-    private var rootfsDir: File? = null
+    private var launcherScript: File? = null
 
     fun initialize(filesDir: File) {
-        prootBinary = File(filesDir, "usr/bin/proot")
-        rootfsDir = File(filesDir, "proot/rootfs")
+        launcherScript = File(filesDir, "usr/bin/proot_launch.sh")
     }
 
+    /**
+     * Executes Git commands through the guest environment.
+     * SINGLE SOURCE OF TRUTH: Uses proot_launch.sh for all execution logic.
+     */
     fun execute(projectDir: File, args: List<String>): Result<String> {
         return try {
-            val proot = prootBinary
-            val rootfs = rootfsDir
+            val launcher = launcherScript
 
-            val command = if (proot != null && proot.exists() && rootfs != null && rootfs.exists()) {
-                listOf(
-                    proot.absolutePath,
-                    "-r", rootfs.absolutePath,
-                    "-0",
-                    "-b", "/dev",
-                    "-b", "/proc",
-                    "-b", "/sys",
-                    "-b", "/sdcard",
-                    "-w", projectDir.absolutePath,
-                    "/usr/bin/git" // Point explicitly to the internal Alpine binary location
-                ) + args
+            val command = if (launcher != null && launcher.exists()) {
+                // Point to the launcher and pass the git command as arguments.
+                // The launcher handles the PRoot virtualization and environment setup.
+                listOf(launcher.absolutePath, "git") + args
             } else {
+                // Emergency fallback to local git if bootstrap is broken.
                 listOf("git") + args
             }
 
