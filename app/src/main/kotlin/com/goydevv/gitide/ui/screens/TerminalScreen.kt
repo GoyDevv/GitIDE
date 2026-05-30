@@ -22,25 +22,18 @@ fun TerminalScreen(
     currentProjectDir: File,
     viewModel: TerminalViewModel = viewModel()
 ) {
-    LaunchedEffect(Unit) {
-        viewModel.startShell(filesDir, currentProjectDir)
+
+    LaunchedEffect(filesDir.absolutePath, currentProjectDir.absolutePath) {
+        viewModel.startShell(
+            filesDir = filesDir,
+            workingDir = currentProjectDir
+        )
     }
 
     val session = viewModel.terminalSession
 
-    if (session != null) {
-        AndroidView(
-            factory = { context ->
-                TerminalView(context, null).apply {
-                    attachSession(session)
-                    requestFocus()
-                }
-            },
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xFF090514))
-        )
-    } else {
+    if (session == null) {
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -51,5 +44,36 @@ fun TerminalScreen(
                 color = MaterialTheme.colorScheme.primary
             )
         }
+
+    } else {
+
+        AndroidView(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF090514)),
+            factory = { context ->
+
+                TerminalView(context, null).apply {
+
+                    try {
+                        attachSession(session)
+                    } catch (_: Throwable) {
+                    }
+
+                    isFocusable = true
+                    isFocusableInTouchMode = true
+                    requestFocus()
+                }
+            },
+            update = { view ->
+
+                try {
+                    if (view.currentSession != session) {
+                        view.attachSession(session)
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+        )
     }
 }

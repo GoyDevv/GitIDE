@@ -115,8 +115,8 @@ class SetupWizardService : Service() {
     private fun downloadRootfs(urlString: String, outputFile: File) {
         val url = URL(urlString)
         val connection = url.openConnection() as HttpURLConnection
-        connection.connectTimeout = 15000
-        connection.readTimeout = 15000
+        connection.connectTimeout = 60000
+        connection.readTimeout = 60000
         connection.connect()
 
         if (connection.responseCode != HttpURLConnection.HTTP_OK) {
