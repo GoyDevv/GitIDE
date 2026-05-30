@@ -15,7 +15,7 @@ class TerminalViewModel : ViewModel() {
 
     /**
      * Standardizes shell launch through the proot_launch.sh script.
-     * Fixed to use /system/bin/sh as the entry point to ensureargv[0] compliance.
+     * Uses /system/bin/sh to execute the launcher, ensuring stable PTY allocation.
      */
     fun startShell(
         filesDir: File,
@@ -30,19 +30,17 @@ class TerminalViewModel : ViewModel() {
         val envp: Array<String>
 
         if (launcherScript.exists()) {
-            // FIX: Use system shell to execute the launcher.
-            // Passing launcher path in args ensures argv[1] is valid for sh.
+            // entrypoint: /system/bin/sh
+            // args[0]: /data/data/.../usr/bin/proot_launch.sh
             executable = "/system/bin/sh"
             args = arrayOf(launcherScript.absolutePath)
 
-            // We only need basic environment variables here;
-            // proot_launch.sh will set up the internal guest environment.
             envp = arrayOf(
                 "TERM=xterm-256color",
                 "LANG=C.UTF-8"
             )
         } else {
-            // Emergency fallback to local Android shell if bootstrap is broken.
+            // Emergency fallback
             executable = "/system/bin/sh"
             args = emptyArray()
             envp = arrayOf(

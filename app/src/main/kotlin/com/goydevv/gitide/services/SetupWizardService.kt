@@ -112,7 +112,7 @@ class SetupWizardService : Service() {
         if (testProc.waitFor() == 0) {
             logStage("SUCCESS: PRoot identified: ${versionOutput.lines().firstOrNull()}")
         } else {
-            throw RuntimeException("CRITICAL: Virtualization layer failed to initialize.")
+            throw RuntimeException("CRITICAL: PRoot binary failed to execute.")
         }
 
         // STAGE 5: Download Rootfs
@@ -132,16 +132,25 @@ class SetupWizardService : Service() {
             _setupState.value = SetupState.Progress("Subsystem verified.", 70)
         }
 
-        // STAGE 7: Launcher Script (Single Source of Truth)
-        logStage("Stage 7/8: Generating environment entry point...")
-        _setupState.value = SetupState.Progress("Generating launcher...", 85)
+        // STAGE 7: Launcher Script & Guest Verification
+        logStage("Stage 7/8: Synchronizing environment entry point...")
+        _setupState.value = SetupState.Progress("Configuring launcher...", 85)
         writeLauncherScript(baseDir, binDir, prootFile, rootfsDir, homeDir)
-        logStage("SUCCESS: proot_launch.sh synchronized.")
+
+        val launcherScript = File(binDir, "proot_launch.sh")
+        val guestTest = ProcessBuilder(launcherScript.absolutePath, "/bin/sh", "-c", "echo READY")
+            .redirectErrorStream(true)
+            .start()
+        val guestOutput = guestTest.inputStream.bufferedReader().readText().trim()
+        if (guestTest.waitFor() == 0 && guestOutput == "READY") {
+            logStage("SUCCESS: Guest environment verified (Alpine sh is active).")
+        } else {
+            throw RuntimeException("CRITICAL: Guest shell verification failed: $guestOutput")
+        }
 
         // STAGE 8: Verify Git
         logStage("Stage 8/8: Verifying Git engine hooks...")
         _setupState.value = SetupState.Progress("Verifying Git...", 95)
-        val launcherScript = File(binDir, "proot_launch.sh")
         val gitCheck = ProcessBuilder(launcherScript.absolutePath, "git", "--version")
             .redirectErrorStream(true)
             .start()
@@ -149,8 +158,8 @@ class SetupWizardService : Service() {
 
         if (exitCode != 0) {
             logStage("INF: Git missing in guest. Installing via apk...")
-            executeInLauncher(launcherScript, "apk update && apk add git")
-            logStage("SUCCESS: Git engine ready.")
+            executeInLauncher(launcherScript, "/bin/sh", "-c", "apk update && apk add git")
+            logStage("SUCCESS: Git installed successfully.")
         } else {
             logStage("SUCCESS: Git engine confirmed.")
         }
@@ -205,20 +214,30 @@ class SetupWizardService : Service() {
             export TERM=xterm-256color
             export LANG=C.UTF-8
 
-            PROOT_CMD="${proot.absolutePath} -r ${rootfs.absolutePath} -0 -b /dev -b /proc -b /sys -b /sdcard -b ${baseDir.absolutePath}:${baseDir.absolutePath} -b ${home.absolutePath}:/home/goydevv"
-
-            if [ ${'$'}# -gt 0 ]; then
-                exec ${'$'}PROOT_CMD /bin/sh -c "${'$'}*"
-            else
-                exec ${'$'}PROOT_CMD /bin/sh
+            if [ $# -eq 0 ]; then
+                set -- /bin/sh
             fi
+
+            exec "${proot.absolutePath}" \
+            -r "${rootfs.absolutePath}" \
+            -0 \
+            --link2symlink \
+            --sysvipc \
+            --kill-on-exit \
+            -b /dev \
+            -b /proc \
+            -b /sys \
+            -b /sdcard \
+            -b "${baseDir.absolutePath}:${baseDir.absolutePath}" \
+            -b "${home.absolutePath}:/home/goydevv" \
+            "$@"
             """.trimIndent()
         )
         launcherScript.setExecutable(true, false)
     }
 
-    private fun executeInLauncher(launcher: File, command: String) {
-        val process = ProcessBuilder(launcher.absolutePath, command)
+    private fun executeInLauncher(launcher: File, vararg command: String) {
+        val process = ProcessBuilder(launcher.absolutePath, *command)
             .redirectErrorStream(true)
             .start()
         process.inputStream.bufferedReader().use { it.forEachLine { line -> logStage(line) } }

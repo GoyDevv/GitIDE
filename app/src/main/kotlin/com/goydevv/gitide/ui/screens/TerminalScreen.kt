@@ -54,10 +54,12 @@ fun TerminalScreen(
             factory = { context ->
 
                 TerminalView(context, null).apply {
+                    attachSession(session)
 
-                    try {
-                        attachSession(session)
-                    } catch (_: Throwable) {
+                    // CRITICAL: PTY and emulator state often depend on initial size.
+                    // TerminalView.updateSize() internally calls session.updateSize().
+                    post {
+                        updateSize()
                     }
 
                     isFocusable = true
@@ -66,12 +68,9 @@ fun TerminalScreen(
                 }
             },
             update = { view ->
-
-                try {
-                    if (view.currentSession != session) {
-                        view.attachSession(session)
-                    }
-                } catch (_: Throwable) {
+                if (view.currentSession != session) {
+                    view.attachSession(session)
+                    view.updateSize()
                 }
             }
         )
