@@ -91,7 +91,7 @@ class SetupWizardService : Service() {
         _setupState.value = SetupState.Progress("Testing JNI hooks...", 20)
         logStage("SUCCESS: Native bridge (libtermux.so) active.")
 
-        // STAGE 3: Deploy Executables
+        // STAGE 3: Verify Executables
         logStage("Stage 3/8: Deploying architecture binaries...")
         _setupState.value = SetupState.Progress("Deploying binaries...", 30)
         val busyboxFile = File(binDir, "busybox")
@@ -206,33 +206,38 @@ class SetupWizardService : Service() {
 
     private fun writeLauncherScript(baseDir: File, binDir: File, proot: File, rootfs: File, home: File) {
         val launcherScript = File(binDir, "proot_launch.sh")
-        launcherScript.writeText(
-            """
-            #!/system/bin/sh
-            export HOME=/home/goydevv
-            export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-            export TERM=xterm-256color
-            export LANG=C.UTF-8
+        val prootPath = proot.absolutePath
+        val rootfsPath = rootfs.absolutePath
+        val baseDirPath = baseDir.absolutePath
+        val homePath = home.absolutePath
 
-            if [ $# -eq 0 ]; then
-                set -- /bin/sh
-            fi
+        // We construct the script using raw strings and manual concatenation to ensure
+        // $ characters are correctly literal where needed.
+        val script = StringBuilder()
+        script.append("#!/system/bin/sh\n")
+        script.append("# GitIDE PRoot Launcher\n\n")
+        script.append("export HOME=/home/goydevv\n")
+        script.append("export PATH=/usr/bin:/bin:/usr/sbin:/sbin\n")
+        script.append("export TERM=xterm-256color\n")
+        script.append("export LANG=C.UTF-8\n\n")
+        script.append("if [ $# -eq 0 ]; then\n")
+        script.append("    set -- /bin/sh\n")
+        script.append("fi\n\n")
+        script.append("exec \"").append(prootPath).append("\" \\\n")
+        script.append("    -r \"").append(rootfsPath).append("\" \\\n")
+        script.append("    -0 \\\n")
+        script.append("    --link2symlink \\\n")
+        script.append("    --sysvipc \\\n")
+        script.append("    --kill-on-exit \\\n")
+        script.append("    -b /dev \\\n")
+        script.append("    -b /proc \\\n")
+        script.append("    -b /sys \\\n")
+        script.append("    -b /sdcard \\\n")
+        script.append("    -b \"").append(baseDirPath).append(":").append(baseDirPath).append("\" \\\n")
+        script.append("    -b \"").append(homePath).append(":/home/goydevv\" \\\n")
+        script.append("    \"$@\"\n")
 
-            exec "${proot.absolutePath}" \
-            -r "${rootfs.absolutePath}" \
-            -0 \
-            --link2symlink \
-            --sysvipc \
-            --kill-on-exit \
-            -b /dev \
-            -b /proc \
-            -b /sys \
-            -b /sdcard \
-            -b "${baseDir.absolutePath}:${baseDir.absolutePath}" \
-            -b "${home.absolutePath}:/home/goydevv" \
-            "$@"
-            """.trimIndent()
-        )
+        launcherScript.writeText(script.toString())
         launcherScript.setExecutable(true, false)
     }
 
