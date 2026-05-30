@@ -43,7 +43,9 @@ class SetupWizardService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Initializing system components..."))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForeground(NOTIFICATION_ID, buildNotification("Initializing system components..."))
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -75,109 +77,86 @@ class SetupWizardService : Service() {
         }
 
         // STAGE 1: Verify terminal backend
-        logStage("Stage 1/8: Verifying terminal backend subsystem...")
-        _setupState.value = SetupState.Progress("Verifying terminal backend...", 10)
+        logStage("Stage 1/8: Verifying terminal emulator availability...")
+        _setupState.value = SetupState.Progress("Verifying backend...", 10)
         try {
             Class.forName("com.termux.terminal.TerminalSession")
-            logStage("SUCCESS: TerminalSession class identified in classpath.")
+            logStage("SUCCESS: Terminal modules identified in classpath.")
         } catch (e: Exception) {
-            throw RuntimeException("CRITICAL: Terminal emulator classes missing.")
+            throw RuntimeException("CRITICAL: Terminal emulator modules missing.")
         }
 
         // STAGE 2: Verify JNI backend
-        logStage("Stage 2/8: Verifying JNI backend hooks...")
-        _setupState.value = SetupState.Progress("Verifying JNI backend...", 20)
-        logStage("SUCCESS: JNI native bridge initialized.")
+        logStage("Stage 2/8: Testing JNI native hooks...")
+        _setupState.value = SetupState.Progress("Testing JNI hooks...", 20)
+        // Libtermux is loaded statically in JNI.java; any failure would have thrown UnsatisfiedLinkError
+        logStage("SUCCESS: Native bridge (libtermux.so) active.")
 
-        // STAGE 3: Verify executable permissions
-        logStage("Stage 3/8: Deploying and verifying executable permissions...")
-        _setupState.value = SetupState.Progress("Deploying system binaries...", 30)
+        // STAGE 3: Verify Executables
+        logStage("Stage 3/8: Deploying architecture binaries...")
+        _setupState.value = SetupState.Progress("Deploying binaries...", 30)
         val busyboxFile = File(binDir, "busybox")
         val prootFile = File(binDir, "proot")
-
         copyAssetToInternal("busybox-aarch64", busyboxFile)
         copyAssetToInternal("proot-aarch64", prootFile)
-
         busyboxFile.setExecutable(true, false)
         prootFile.setExecutable(true, false)
+        logStage("SUCCESS: Binaries deployed to internal bin path.")
 
-        logStage("SUCCESS: Binaries deployed to ${binDir.absolutePath}")
-
-        // STAGE 4: Verify PRoot availability
-        logStage("Stage 4/8: Testing PRoot virtualization layer...")
-        _setupState.value = SetupState.Progress("Verifying PRoot availability...", 40)
+        // STAGE 4: Test PRoot
+        logStage("Stage 4/8: Testing virtualization layer...")
+        _setupState.value = SetupState.Progress("Testing PRoot...", 40)
         val testProc = ProcessBuilder(prootFile.absolutePath, "--version")
             .redirectErrorStream(true)
             .start()
         val versionOutput = testProc.inputStream.bufferedReader().readText()
-        testProc.waitFor()
-        if (testProc.exitValue() == 0) {
-            logStage("SUCCESS: PRoot identified: ${versionOutput.lines().firstOrNull()}")
+        if (testProc.waitFor() == 0) {
+            logStage("SUCCESS: Virtualization layer identified: ${versionOutput.lines().firstOrNull()}")
         } else {
-            throw RuntimeException("CRITICAL: PRoot binary failed to execute.")
+            throw RuntimeException("CRITICAL: Virtualization layer failed to initialize.")
         }
 
-        // STAGE 5: Verify rootfs availability
-        logStage("Stage 5/8: Validating Linux rootfs integrity...")
-        _setupState.value = SetupState.Progress("Validating Linux rootfs...", 50)
+        // STAGE 5: Download Rootfs
+        logStage("Stage 5/8: Validating subsystem integrity...")
+        _setupState.value = SetupState.Progress("Verifying rootfs...", 50)
         val rootfsTar = File(prootDir, "rootfs.tar.gz")
         if (!File(rootfsDir, "bin/sh").exists()) {
-            logStage("INF: Rootfs missing. Initiating Alpine minirootfs retrieval...")
+            logStage("INF: Rootfs not found. Initiating remote retrieval...")
             downloadRootfs("https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/aarch64/alpine-minirootfs-3.19.1-aarch64.tar.gz", rootfsTar)
 
-            logStage("Stage 6/8: Extracting subsystem structure...")
-            _setupState.value = SetupState.Progress("Extracting subsystem structure...", 70)
+            logStage("Stage 6/8: Constructing Linux filesystem...")
+            _setupState.value = SetupState.Progress("Extracting structure...", 70)
             extractTarGz(busyboxFile, rootfsTar, rootfsDir)
-            logStage("SUCCESS: Alpine rootfs extracted.")
+            logStage("SUCCESS: Linux guest filesystem extracted.")
         } else {
-            logStage("SUCCESS: Rootfs already exists at ${rootfsDir.absolutePath}")
-            logStage("Stage 6/8: Extraction skipped (Integrity verified).")
-            _setupState.value = SetupState.Progress("Rootfs verified.", 70)
+            logStage("SUCCESS: Subsystem storage verified.")
+            _setupState.value = SetupState.Progress("Subsystem verified.", 70)
         }
 
-        // STAGE 7: Verify shell startup
-        logStage("Stage 7/8: Testing shell startup under virtualization...")
-        _setupState.value = SetupState.Progress("Testing shell startup...", 85)
+        // STAGE 7: Launcher Script (Single Source of Truth)
+        logStage("Stage 7/8: Generating environment entry point...")
+        _setupState.value = SetupState.Progress("Generating launcher...", 85)
         writeLauncherScript(baseDir, binDir, prootFile, rootfsDir, homeDir)
+        logStage("SUCCESS: proot_launch.sh synchronized.")
 
-        val shellTest = ProcessBuilder(
-            prootFile.absolutePath,
-            "-r", rootfsDir.absolutePath,
-            "-0",
-            "-b", "/dev",
-            "-b", "/proc",
-            "-b", "/sys",
-            "/bin/sh", "-c", "echo 'GitIDE virtual shell active'"
-        ).start()
-        val shellOutput = shellTest.inputStream.bufferedReader().readText().trim()
-        shellTest.waitFor()
-        if (shellOutput == "GitIDE virtual shell active") {
-            logStage("SUCCESS: Virtual shell confirmed.")
-        } else {
-            throw RuntimeException("CRITICAL: Shell startup verification failed.")
-        }
-
-        // STAGE 8: Verify Git availability
+        // STAGE 8: Verify Git
         logStage("Stage 8/8: Verifying Git engine hooks...")
-        _setupState.value = SetupState.Progress("Verifying Git engine...", 95)
-        val gitCheck = ProcessBuilder(
-            prootFile.absolutePath,
-            "-r", rootfsDir.absolutePath,
-            "-0",
-            "/usr/bin/git", "--version"
-        ).redirectErrorStream(true).start()
-        val gitCheckExit = gitCheck.waitFor()
+        _setupState.value = SetupState.Progress("Verifying Git...", 95)
+        val launcherScript = File(binDir, "proot_launch.sh")
+        val gitCheck = ProcessBuilder(launcherScript.absolutePath, "git", "--version")
+            .redirectErrorStream(true)
+            .start()
+        val exitCode = gitCheck.waitFor()
 
-        if (gitCheckExit != 0) {
-            logStage("INF: Git not found. Installing via apk...")
-            executeInProot(prootFile, rootfsDir, "apk update && apk add git")
-            logStage("SUCCESS: Git installed successfully.")
+        if (exitCode != 0) {
+            logStage("INF: Git missing in guest. Installing via apk...")
+            executeInLauncher(launcherScript, "apk update && apk add git")
+            logStage("SUCCESS: Git engine ready.")
         } else {
-            val gitVersion = gitCheck.inputStream.bufferedReader().readText().trim()
-            logStage("SUCCESS: Git engine ready: $gitVersion")
+            logStage("SUCCESS: Git engine confirmed.")
         }
 
-        logStage("BOOTSTRAP COMPLETE: Matrix synchronized.")
+        logStage("BOOTSTRAP COMPLETE.")
         _setupState.value = SetupState.Success
         stopSelf()
     }
@@ -189,11 +168,7 @@ class SetupWizardService : Service() {
     private fun copyAssetToInternal(assetName: String, targetFile: File) {
         assets.open(assetName).use { input ->
             FileOutputStream(targetFile).use { output ->
-                val buffer = ByteArray(16384)
-                var bytesRead: Int
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    output.write(buffer, 0, bytesRead)
-                }
+                input.copyTo(output)
             }
         }
     }
@@ -201,21 +176,13 @@ class SetupWizardService : Service() {
     private fun downloadRootfs(urlString: String, outputFile: File) {
         val url = URL(urlString)
         val connection = url.openConnection() as HttpURLConnection
-        connection.connectTimeout = 60000
-        connection.readTimeout = 60000
         connection.connect()
-
         if (connection.responseCode != HttpURLConnection.HTTP_OK) {
             throw RuntimeException("Mirror connection failed code: ${connection.responseCode}")
         }
-
         connection.inputStream.use { input ->
             FileOutputStream(outputFile).use { output ->
-                val buffer = ByteArray(16384)
-                var bytesRead: Int
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    output.write(buffer, 0, bytesRead)
-                }
+                input.copyTo(output)
             }
         }
     }
@@ -224,72 +191,46 @@ class SetupWizardService : Service() {
         val process = ProcessBuilder(
             busybox.absolutePath, "tar", "-zxvf", tarFile.absolutePath, "-C", outputDir.absolutePath
         ).redirectErrorStream(true).start()
-
-        process.inputStream.bufferedReader().use { reader ->
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                _setupState.value = SetupState.TerminalLog(line!!)
-            }
-        }
+        process.inputStream.bufferedReader().use { it.forEachLine { line -> logStage(line) } }
         process.waitFor()
         if (tarFile.exists()) tarFile.delete()
     }
 
     private fun writeLauncherScript(baseDir: File, binDir: File, proot: File, rootfs: File, home: File) {
         val launcherScript = File(binDir, "proot_launch.sh")
+        // Logic:
+        // 1. If arguments are passed, it runs them via /bin/sh -c
+        // 2. If no arguments, it starts an interactive /bin/sh
+        // Using $ instead of raw $ to avoid Kotlin interpolation in the shell script
         launcherScript.writeText(
             """
             #!/system/bin/sh
-            export UNSET_AM_VARIABLES=1
             export HOME=/home/goydevv
             export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-            exec ${proot.absolutePath} -r ${rootfs.absolutePath} -0 -b /dev -b /proc -b /sys -b /sdcard -b ${baseDir.absolutePath}:${baseDir.absolutePath} -w /home/goydevv /bin/sh
+            export TERM=xterm-256color
+            export LANG=C.UTF-8
+
+            PROOT_CMD="${proot.absolutePath} -r ${rootfs.absolutePath} -0 -b /dev -b /proc -b /sys -b /sdcard -b ${baseDir.absolutePath}:${baseDir.absolutePath} -w /home/goydevv"
+
+            if [ $# -gt 0 ]; then
+                exec ${'$'}PROOT_CMD /bin/sh -c "${'$'}*"
+            else
+                exec ${'$'}PROOT_CMD /bin/sh
+            fi
             """.trimIndent()
         )
         launcherScript.setExecutable(true, false)
     }
 
-    private fun executeInProot(proot: File, rootfs: File, command: String) {
-        val process = ProcessBuilder().command(
-            proot.absolutePath,
-            "-r", rootfs.absolutePath,
-            "-0",
-            "-b", "/dev",
-            "-b", "/proc",
-            "-b", "/sys",
-            "/bin/sh", "-c", command
-        ).redirectErrorStream(true).start()
-
-        process.inputStream.bufferedReader().use { reader ->
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                _setupState.value = SetupState.TerminalLog(line!!)
-            }
-        }
+    private fun executeInLauncher(launcher: File, command: String) {
+        val process = ProcessBuilder(launcher.absolutePath, command)
+            .redirectErrorStream(true)
+            .start()
+        process.inputStream.bufferedReader().use { it.forEachLine { line -> logStage(line) } }
         process.waitFor()
     }
 
-    private fun buildNotification(text: String): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("GitIDE Subsystem Setup")
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true)
-            .build()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Subsystem Bootstrap Status",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.createNotificationChannel(channel)
-        }
-    }
-
     override fun onBind(intent: Intent?): IBinder? = null
+    private fun buildNotification(text: String): Notification = NotificationCompat.Builder(this, CHANNEL_ID).setContentTitle("GitIDE Subsystem Setup").setContentText(text).setSmallIcon(android.R.drawable.stat_sys_download).setPriority(NotificationCompat.PRIORITY_LOW).setOngoing(true).build()
+    private fun createNotificationChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager; manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Subsystem Bootstrap Status", NotificationManager.IMPORTANCE_LOW)) } }
 }

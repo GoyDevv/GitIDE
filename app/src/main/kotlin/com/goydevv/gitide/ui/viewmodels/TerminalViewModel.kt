@@ -13,43 +13,39 @@ class TerminalViewModel : ViewModel() {
     var terminalSession by mutableStateOf<TerminalSession?>(null)
         private set
 
+    /**
+     * Standardizes shell launch through the proot_launch.sh script.
+     * This ensures Terminal and GitEngine share the exact same environment.
+     */
     fun startShell(
         filesDir: File,
         workingDir: File
     ) {
-
         if (terminalSession != null) return
 
         val launcherScript = File(filesDir, "usr/bin/proot_launch.sh")
-        val prootBinary = File(filesDir, "usr/bin/proot")
-        val rootfsDir = File(filesDir, "proot/rootfs")
 
         val executable: String
         val args: Array<String>
         val envp: Array<String>
 
-        if (launcherScript.exists() && rootfsDir.exists()) {
-            // Point to /system/bin/sh as the entry point which then execs into proot via the script
-            executable = "/system/bin/sh"
-            args = arrayOf(launcherScript.absolutePath)
-
+        if (launcherScript.exists()) {
+            // SINGLE SOURCE OF TRUTH: Execute the launcher script.
+            // proot_launch.sh handles its own HOME, PATH, and PRoot flags.
+            executable = launcherScript.absolutePath
+            args = emptyArray()
             envp = arrayOf(
                 "TERM=xterm-256color",
-                "HOME=/home/goydevv",
-                "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
-                "LANG=C.UTF-8",
-                "COLORTERM=truecolor",
-                "TMPDIR=/tmp"
+                "LANG=C.UTF-8"
             )
         } else {
-            // Fallback to local Android shell if bootstrap is not complete
+            // Emergency fallback to local Android shell if bootstrap is broken.
             executable = "/system/bin/sh"
             args = emptyArray()
             envp = arrayOf(
                 "TERM=xterm-256color",
-                "HOME=${workingDir.absolutePath}",
                 "PATH=/system/bin:/system/xbin",
-                "LANG=C.UTF-8"
+                "HOME=${workingDir.absolutePath}"
             )
         }
 
