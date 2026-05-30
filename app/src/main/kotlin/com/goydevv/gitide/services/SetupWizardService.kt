@@ -89,10 +89,9 @@ class SetupWizardService : Service() {
         // STAGE 2: Verify JNI backend
         logStage("Stage 2/8: Testing JNI native hooks...")
         _setupState.value = SetupState.Progress("Testing JNI hooks...", 20)
-        // Libtermux is loaded statically in JNI.java; any failure would have thrown UnsatisfiedLinkError
         logStage("SUCCESS: Native bridge (libtermux.so) active.")
 
-        // STAGE 3: Verify Executables
+        // STAGE 3: Deploy Executables
         logStage("Stage 3/8: Deploying architecture binaries...")
         _setupState.value = SetupState.Progress("Deploying binaries...", 30)
         val busyboxFile = File(binDir, "busybox")
@@ -111,7 +110,7 @@ class SetupWizardService : Service() {
             .start()
         val versionOutput = testProc.inputStream.bufferedReader().readText()
         if (testProc.waitFor() == 0) {
-            logStage("SUCCESS: Virtualization layer identified: ${versionOutput.lines().firstOrNull()}")
+            logStage("SUCCESS: PRoot identified: ${versionOutput.lines().firstOrNull()}")
         } else {
             throw RuntimeException("CRITICAL: Virtualization layer failed to initialize.")
         }
@@ -198,10 +197,6 @@ class SetupWizardService : Service() {
 
     private fun writeLauncherScript(baseDir: File, binDir: File, proot: File, rootfs: File, home: File) {
         val launcherScript = File(binDir, "proot_launch.sh")
-        // Logic:
-        // 1. If arguments are passed, it runs them via /bin/sh -c
-        // 2. If no arguments, it starts an interactive /bin/sh
-        // Using $ instead of raw $ to avoid Kotlin interpolation in the shell script
         launcherScript.writeText(
             """
             #!/system/bin/sh
@@ -210,9 +205,9 @@ class SetupWizardService : Service() {
             export TERM=xterm-256color
             export LANG=C.UTF-8
 
-            PROOT_CMD="${proot.absolutePath} -r ${rootfs.absolutePath} -0 -b /dev -b /proc -b /sys -b /sdcard -b ${baseDir.absolutePath}:${baseDir.absolutePath} -w /home/goydevv"
+            PROOT_CMD="${proot.absolutePath} -r ${rootfs.absolutePath} -0 -b /dev -b /proc -b /sys -b /sdcard -b ${baseDir.absolutePath}:${baseDir.absolutePath} -b ${home.absolutePath}:/home/goydevv"
 
-            if [ $# -gt 0 ]; then
+            if [ ${'$'}# -gt 0 ]; then
                 exec ${'$'}PROOT_CMD /bin/sh -c "${'$'}*"
             else
                 exec ${'$'}PROOT_CMD /bin/sh

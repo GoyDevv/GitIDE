@@ -15,7 +15,7 @@ class TerminalViewModel : ViewModel() {
 
     /**
      * Standardizes shell launch through the proot_launch.sh script.
-     * This ensures Terminal and GitEngine share the exact same environment.
+     * Fixed to use /system/bin/sh as the entry point to ensureargv[0] compliance.
      */
     fun startShell(
         filesDir: File,
@@ -30,10 +30,13 @@ class TerminalViewModel : ViewModel() {
         val envp: Array<String>
 
         if (launcherScript.exists()) {
-            // SINGLE SOURCE OF TRUTH: Execute the launcher script.
-            // proot_launch.sh handles its own HOME, PATH, and PRoot flags.
-            executable = launcherScript.absolutePath
-            args = emptyArray()
+            // FIX: Use system shell to execute the launcher.
+            // Passing launcher path in args ensures argv[1] is valid for sh.
+            executable = "/system/bin/sh"
+            args = arrayOf(launcherScript.absolutePath)
+
+            // We only need basic environment variables here;
+            // proot_launch.sh will set up the internal guest environment.
             envp = arrayOf(
                 "TERM=xterm-256color",
                 "LANG=C.UTF-8"
