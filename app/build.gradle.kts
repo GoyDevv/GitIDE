@@ -53,6 +53,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation ("org.apache.commons:commons-compress:1.26.1")
+
 
     // Terminal architecture linkups
     implementation(project(":terminal-emulator"))
